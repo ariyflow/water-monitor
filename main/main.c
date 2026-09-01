@@ -9,8 +9,7 @@
  *   - 浊度 AO:        GPIO7 (ADC1_CH6); GPIO15 不用, DO 不接
  *   - 数码管: 见 seg.h (位选 IO11/12, 段选 IO18/16/9/3/8/17/10/46)
  *   - LED:   见 led.h (A0/A1/A2 -> IO35/36/37)
- *   - 按键:  SW1 -> IO48 (key.h KEY_0)
- *   - 蜂鸣器:见 buzzer.h (IO2)
+ *   - 按键:  SW1 -> IO48 (key.h KEY_0), SW2 -> IO45 (key.h KEY_1, 蓝牙开关)
  *
  * 软件结构: 双核分工
  *   - 传感器核 (core 1): 专用任务周期性调用各传感器读取函数
@@ -24,11 +23,16 @@
  *   - 开机默认显示温度, 按 SW1 循环切换: 温度 -> 水流量 -> EC -> 浊度 -> 温度...
  *   - LED 指示: 温度 0x01(LED0), 水流量 0x02(LED1), EC 0x04(LED2), 浊度 0x08(LED3)
  *
+ * 蓝牙控制:
+ *   - 开机默认关闭蓝牙(不广播), 按 SW2(KEY_1) 开/关蓝牙
+ *   - 蓝牙开启时 LED7(0x80) 点亮, 关闭后熄灭
+ *
  * 显示格式: 温度/流量 XX.X, EC 整数(μS/cm), 浊度整数(0~100); 失败显示 "EEEE"
  */
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -39,7 +43,8 @@
 #include "turbidity.h"
 #include "led.h"
 #include "key.h"
-#include "buzzer.h"
+#include "ble.h"
+#include "wifi_sta.h"
 
 #define TAG "sensor_disp"
 
@@ -52,6 +57,7 @@
 #define LED_FLOW 0x02 /**< 指示位: 数码管显示水流量 */
 #define LED_EC   0x04 /**< 指示位: 数码管显示电导率 */
 #define LED_TURB 0x08 /**< 指示位: 数码管显示浊度 */
+#define LED_BLE  0x80 /**< 指示位: 蓝牙开启指示(LED7, 最高位) */
 
 /** @brief 显示通道索引 */
 enum {
@@ -84,6 +90,47 @@ static volatile int g_temp = 0;
 static volatile int g_flow = 0;
 static volatile int g_ec   = 0;
 static volatile int g_turb = 0;
+
+/** @brief 解析 BLE 收到的 WiFi 凭据并连接
+ *         载荷格式: [ssid_len:1][pass_len:1][ssid][pass] */
+static void wifi_creds_from_ble(const uint8_t *data, size_t len)
+{
+    size_t ssid_len, pass_len;
+
+    if (len < 2) {
+        ESP_LOGW(TAG, "wifi creds: too short (%d bytes)", (int)len);
+        return;
+    }
+    ssid_len = data[0];
+    pass_len = data[1];
+    if (2 + ssid_len + pass_len != len) {
+        ESP_LOGW(TAG, "wifi creds: length mismatch");
+        return;
+    }
+    if (ssid_len == 0 || ssid_len > WIFI_MAX_SSID_LEN ||
+        pass_len > WIFI_MAX_PASS_LEN) {
+        ESP_LOGW(TAG, "wifi creds: invalid len ssid=%d pass=%d",
+                 (int)ssid_len, (int)pass_len);
+        return;
+    }
+
+    char ssid[WIFI_MAX_SSID_LEN + 1] = {0};
+    char pass[WIFI_MAX_PASS_LEN + 1] = {0};
+
+    memcpy(ssid, data + 2, ssid_len);
+    memcpy(pass, data + 2 + ssid_len, pass_len);
+
+    ESP_LOGI(TAG, "wifi creds: ssid=%s pass_len=%d", ssid, (int)pass_len);
+    wifi_sta_connect(ssid, pass);
+}
+
+/** @brief BLE 数据回调: 打印收到内容, 并尝试解析为 WiFi 凭据 */
+static void on_ble_data(const uint8_t *data, size_t len)
+{
+    ESP_LOGI(TAG, "ble rx %d bytes: %.*s", (int)len, (int)len,
+             (const char *)data);
+    wifi_creds_from_ble(data, len);
+}
 
 /** @brief 数值圆整为十分位并钳位 */
 static int to_tenths(float x)
@@ -208,17 +255,28 @@ static void display_value(int v, int point)
     set_point(point);
 }
 
-/** @brief 控制任务: 常驻 core 0, 按键扫描 + 显示切换 + 数码管/LED 扫描 */
+/** @brief 控制任务: 常驻 core 0, 按键扫描 + 显示切换 + 蓝牙开关 + 数码管/LED 扫描 */
 static void control_task(void *arg)
 {
     int sel = SEL_TEMP;
     int last_v = -2; /* 与初始值不同, 确保首轮刷新 */
+    bool ble_on = false;
 
     while (1) {
         if (key_scan_edge(KEY_0)) {
             sel = (sel + 1) % SEL_NUM;
-            set_led(SEL_LED[sel]);
+            set_led(SEL_LED[sel] | (ble_on ? LED_BLE : 0));
             last_v = -2; /* 强制刷新显示 */
+        }
+
+        if (key_scan_edge(KEY_1)) {
+            ble_on = !ble_on;
+            if (ble_on) {
+                wm_ble_start();
+            } else {
+                wm_ble_stop();
+            }
+            set_led(SEL_LED[sel] | (ble_on ? LED_BLE : 0));
         }
 
         int v;
@@ -254,7 +312,6 @@ void app_main(void)
     seg_init();
     led_init();
     key_init();
-    beep_init();
     ds18b20_init(DS18B20_PIN);
     yf_s201_init(YF_S201_PIN);
     ec_init(EC_PIN);
@@ -262,6 +319,11 @@ void app_main(void)
 
     set_led(LED_TEMP); /* 默认指示温度 */
     display_value(0, SEL_POINT[SEL_TEMP]); /* 开机显示 0.0 */
+
+    wm_ble_init();
+    wm_ble_set_data_cb(on_ble_data);
+
+    wifi_sta_init();
 
     xTaskCreatePinnedToCore(sensor_task, "sensor", 4096, NULL, 4, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "control", 2048, NULL, 5, NULL, 0);
