@@ -33,6 +33,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -124,11 +125,9 @@ static void wifi_creds_from_ble(const uint8_t *data, size_t len)
     wifi_sta_connect(ssid, pass);
 }
 
-/** @brief BLE 数据回调: 打印收到内容, 并尝试解析为 WiFi 凭据 */
+/** @brief BLE 数据回调: 尝试解析为 WiFi 凭据 */
 static void on_ble_data(const uint8_t *data, size_t len)
 {
-    ESP_LOGI(TAG, "ble rx %d bytes: %.*s", (int)len, (int)len,
-             (const char *)data);
     wifi_creds_from_ble(data, len);
 }
 
@@ -149,67 +148,67 @@ static int to_tenths(float x)
 /** @brief 传感器任务: 常驻 core 1, 周期性调用各传感器读取函数 */
 static void sensor_task(void *arg)
 {
+    ESP_LOGI(TAG, "sensor format: (temp,flow,ec,turb)");
+
     while (1) {
+        float temp = 0.0f, flow = 0.0f, ec = 0.0f, turb = 0.0f;
+        bool temp_ok = false, flow_ok = false, ec_ok = false, turb_ok = false;
+
         /* 1) 温度: 启动转换并等待完成 */
         if (ds18b20_start_conversion() == ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(CONVERSION_DELAY_MS));
-
-            float temp;
-            if (ds18b20_read_temp(&temp) == ESP_OK) {
-                g_temp = to_tenths(temp);
-                ESP_LOGI(TAG, "temperature: %.2f C", temp);
-            } else {
-                g_temp = ERR_DISP;
-                ESP_LOGE(TAG, "failed to read temperature");
-            }
+            temp_ok = (ds18b20_read_temp(&temp) == ESP_OK);
+            g_temp = temp_ok ? to_tenths(temp) : ERR_DISP;
         } else {
             g_temp = ERR_DISP;
-            ESP_LOGE(TAG, "ds18b20 not found on GPIO%d", DS18B20_PIN);
             vTaskDelay(pdMS_TO_TICKS(CONVERSION_DELAY_MS)); /* 保持采样节奏 */
         }
 
         /* 2) 电导率: 无温度补偿, 整数 μS/cm */
-        float ec;
-        if (ec_read(&ec) == ESP_OK) {
+        ec_ok = (ec_read(&ec) == ESP_OK);
+        if (ec_ok) {
             int v = (int)(ec + 0.5f);
-            if (v < 0) {
-                v = 0;
-            }
-            if (v > 9999) {
-                v = 9999;
-            }
-            g_ec = v;
-            ESP_LOGI(TAG, "ec: %.0f uS/cm", ec);
+            g_ec = (v < 0) ? 0 : ((v > 9999) ? 9999 : v);
         } else {
             g_ec = ERR_DISP;
-            ESP_LOGE(TAG, "failed to read ec");
         }
 
         /* 3) 浊度: 简易 0~100 指数 */
-        float turb;
-        if (turb_read(&turb) == ESP_OK) {
+        turb_ok = (turb_read(&turb) == ESP_OK);
+        if (turb_ok) {
             int v = (int)(turb + 0.5f);
-            if (v < 0) {
-                v = 0;
-            }
-            if (v > 100) {
-                v = 100;
-            }
-            g_turb = v;
-            ESP_LOGI(TAG, "turbidity: %.0f", turb);
+            g_turb = (v < 0) ? 0 : ((v > 100) ? 100 : v);
         } else {
             g_turb = ERR_DISP;
-            ESP_LOGE(TAG, "failed to read turbidity");
         }
 
         /* 4) 流量: 读取一个测量窗口内的流量 */
-        float flow;
-        if (yf_s201_read_flow(&flow) == ESP_OK) {
-            g_flow = to_tenths(flow);
-            ESP_LOGI(TAG, "flow: %.2f L/min", flow);
+        flow_ok = (yf_s201_read_flow(&flow) == ESP_OK);
+        g_flow = flow_ok ? to_tenths(flow) : ERR_DISP;
+
+        /* 每次采样一行输出 */
+        char s_temp[16], s_flow[16], s_ec[16], s_turb[16];
+        if (temp_ok) {
+            snprintf(s_temp, sizeof s_temp, "%.1f", temp);
         } else {
-            g_flow = ERR_DISP;
+            strcpy(s_temp, "ERR");
         }
+        if (flow_ok) {
+            snprintf(s_flow, sizeof s_flow, "%.2f", flow);
+        } else {
+            strcpy(s_flow, "ERR");
+        }
+        if (ec_ok) {
+            snprintf(s_ec, sizeof s_ec, "%.0f", ec);
+        } else {
+            strcpy(s_ec, "ERR");
+        }
+        if (turb_ok) {
+            snprintf(s_turb, sizeof s_turb, "%.0f", turb);
+        } else {
+            strcpy(s_turb, "ERR");
+        }
+        ESP_LOGI(TAG, "sensor(%s,%s,%s,%s)", s_temp, s_flow, s_ec, s_turb);
 
         vTaskDelay(pdMS_TO_TICKS(HOLD_DELAY_MS));
     }

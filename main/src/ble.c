@@ -79,8 +79,7 @@ static int wm_rx_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         return BLE_ATT_ERR_UNLIKELY;
     }
 
-    ESP_LOGI(BLE_TAG, "rx %d bytes (conn_handle=%d): %.*s", len, conn_handle,
-             (int)len, (const char *)buf);
+    ESP_LOGI(BLE_TAG, "rx %d bytes", len);
 
     if (s_data_cb) {
         s_data_cb(buf, len);
@@ -166,11 +165,6 @@ static int wm_gap_event_handler(struct ble_gap_event *event, void *arg)
         }
         return 0;
 
-    case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(BLE_TAG, "mtu updated; conn_handle=%d mtu=%d",
-                 event->mtu.conn_handle, event->mtu.value);
-        return 0;
-
     default:
         return 0;
     }
@@ -202,25 +196,10 @@ static void wm_on_stack_reset(int reason)
     ESP_LOGI(BLE_TAG, "nimble stack reset, reason: %d", reason);
 }
 
-static void wm_gatt_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
-{
-    switch (ctxt->op) {
-    case BLE_GATT_REGISTER_OP_SVC:
-        ESP_LOGI(BLE_TAG, "service registered");
-        break;
-    case BLE_GATT_REGISTER_OP_CHR:
-        ESP_LOGI(BLE_TAG, "characteristic registered");
-        break;
-    default:
-        break;
-    }
-}
-
 static void wm_host_config_init(void)
 {
     ble_hs_cfg.reset_cb = wm_on_stack_reset;
     ble_hs_cfg.sync_cb = wm_on_stack_sync;
-    ble_hs_cfg.gatts_register_cb = wm_gatt_register_cb;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
     ble_store_config_init();
