@@ -10,6 +10,7 @@
  *   - 数码管: 见 seg.h (位选 IO11/12, 段选 IO18/16/9/3/8/17/10/46)
  *   - LED:   见 led.h (A0/A1/A2 -> IO35/36/37)
  *   - 按键:  SW1 -> IO48 (key.h KEY_0), SW2 -> IO45 (key.h KEY_1, 蓝牙开关)
+ *   - 蜂鸣器: 见 buzzer.h (IO2, 高电平鸣响)
  *
  * 软件结构: 双核分工
  *   - 传感器核 (core 1): 专用任务周期性调用各传感器读取函数
@@ -46,6 +47,9 @@
 #include "key.h"
 #include "ble.h"
 #include "wifi_sta.h"
+#include "http_upload.h"
+#include "buzzer.h"
+#include "alarm_config.h"
 
 #define TAG "sensor_disp"
 
@@ -306,11 +310,80 @@ static void control_task(void *arg)
     }
 }
 
+/** @brief 将共享采样值转换为浮点, 错误值时返回 0 */
+static float shared_to_float(int tenths)
+{
+    if (tenths == ERR_DISP) {
+        return 0.0f;
+    }
+    if (tenths < 0) {
+        tenths = 0;
+    }
+    return tenths / 10.0f;
+}
+
+/** @brief 上报任务: 常驻 core 1, 每隔 1s 将最新传感器数据 POST 到服务器 */
+static void upload_task(void *arg)
+{
+    while (1) {
+        if (wifi_sta_is_connected()) {
+            float temp = shared_to_float(g_temp);
+            float flow = shared_to_float(g_flow);
+            float turb = (g_turb == ERR_DISP) ? 0.0f : (float)g_turb;
+            int   ec   = (g_ec > 0) ? g_ec : 0;
+            wm_http_upload(PH_VALUE, temp, flow, turb, ec);
+        }
+        vTaskDelay(pdMS_TO_TICKS(UPLOAD_PERIOD_MS));
+    }
+}
+
+/** @brief 判断当前传感器数据是否超出阈值(任一超限即报警) */
+static bool alarm_active(void)
+{
+    /* 温度: 读取失败(ERR_DISP)不参与判断; 实际温度 = g_temp/10 */
+    bool temp_alarm = (g_temp != ERR_DISP) &&
+        ((float)g_temp / 10.0f <= TEMP_ALARM_LOW_C ||
+         (float)g_temp / 10.0f >  TEMP_ALARM_HIGH_C);
+
+    /* 流量: 实际流量 = g_flow/10 (L/min) */
+    bool flow_alarm = (g_flow != ERR_DISP) &&
+        ((float)g_flow / 10.0f > FLOW_ALARM_HIGH_LPM);
+
+    /* 电导率: g_ec 已是整数 μS/cm */
+    bool ec_alarm = (g_ec != ERR_DISP) &&
+        ((float)g_ec > EC_ALARM_HIGH_US_CM);
+
+    /* 浊度: g_turb 已是整数 0~100 */
+    bool turb_alarm = (g_turb != ERR_DISP) &&
+        ((float)g_turb > TURB_ALARM_HIGH_NTU);
+
+    return temp_alarm || flow_alarm || ec_alarm || turb_alarm;
+}
+
+/** @brief 报警任务: 常驻指定核心, 超阈值时蜂鸣器"响 500ms / 停 500ms"循环 */
+static void alarm_task(void *arg)
+{
+    while (1) {
+        if (alarm_active()) {
+            ESP_LOGW(TAG, "!! ALARM T=%.1f F=%.1f EC=%d TURB=%d",
+                     (float)g_temp / 10.0f, (float)g_flow / 10.0f,
+                     g_ec, g_turb);
+            start_beep();
+            vTaskDelay(pdMS_TO_TICKS(BEEP_ON_MS));
+            stop_beep();
+            vTaskDelay(pdMS_TO_TICKS(BEEP_OFF_MS));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(ALARM_POLL_MS));
+        }
+    }
+}
+
 void app_main(void)
 {
     seg_init();
     led_init();
     key_init();
+    beep_init();
     ds18b20_init(DS18B20_PIN);
     yf_s201_init(YF_S201_PIN);
     ec_init(EC_PIN);
@@ -326,4 +399,7 @@ void app_main(void)
 
     xTaskCreatePinnedToCore(sensor_task, "sensor", 4096, NULL, 4, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "control", 2048, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(upload_task, "upload", 4096, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(alarm_task, "alarm", ALARM_TASK_STACK, NULL,
+                            ALARM_TASK_PRIO, NULL, ALARM_TASK_CORE);
 }
