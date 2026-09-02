@@ -64,6 +64,7 @@
 #define LED_EC   0x04 /**< 指示位: 数码管显示电导率 */
 #define LED_TURB 0x08 /**< 指示位: 数码管显示浊度 */
 #define LED_BLE  0x80 /**< 指示位: 蓝牙开启指示(LED7, 最高位) */
+#define LED_WIFI 0x40 /**< 指示位: WiFi 已连接指示(LED6) */
 
 /** @brief 显示通道索引 */
 enum {
@@ -279,11 +280,11 @@ static void control_task(void *arg)
     int sel = SEL_TEMP;
     int last_v = -2; /* 与初始值不同, 确保首轮刷新 */
     bool ble_on = false;
+    uint8_t last_led = 0xFF; /* 与初始不同, 确保首轮写入 */
 
     while (1) {
         if (key_scan_edge(KEY_0)) {
             sel = (sel + 1) % SEL_NUM;
-            set_led(SEL_LED[sel] | (ble_on ? LED_BLE : 0));
             last_v = -2; /* 强制刷新显示 */
         }
 
@@ -294,7 +295,14 @@ static void control_task(void *arg)
             } else {
                 wm_ble_stop();
             }
-            set_led(SEL_LED[sel] | (ble_on ? LED_BLE : 0));
+        }
+
+        /* 组装 LED 指示: 当前显示项 + 蓝牙指示 + WiFi 状态(LED6, 常亮=已连接) */
+        uint8_t led_mask = SEL_LED[sel] | (ble_on ? LED_BLE : 0) |
+                           (wifi_sta_is_connected() ? LED_WIFI : 0);
+        if (led_mask != last_led) {
+            set_led(led_mask);
+            last_led = led_mask;
         }
 
         int v;
