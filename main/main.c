@@ -50,13 +50,14 @@
 #include "http_upload.h"
 #include "buzzer.h"
 #include "alarm_config.h"
+#include "device_cfg.h"
 
 #define TAG "sensor_disp"
 
 #define CONVERSION_DELAY_MS 750 /**< DS18B20 12bit 转换时间 */
 #define HOLD_DELAY_MS       250 /**< 传感器两次采样间间隔 */
 
-#define ERR_DISP -1 /**< 共享值中表示读取失败的标志 */
+#define ERR_DISP (-32768) /**< 共享值中表示读取失败的标志: 取不可能出现的值, 避免与合法负温度(-1)冲突 */
 
 #define LED_TEMP 0x01 /**< 指示位: 数码管显示温度 */
 #define LED_FLOW 0x02 /**< 指示位: 数码管显示水流量 */
@@ -96,36 +97,47 @@ static volatile int g_flow = 0;
 static volatile int g_ec   = 0;
 static volatile int g_turb = 0;
 
-/** @brief 解析 BLE 收到的 WiFi 凭据并连接
- *         载荷格式: [ssid_len:1][pass_len:1][ssid][pass] */
+/** @brief 报警去抖计数: 连续多少次采样满足报警条件才真正鸣响(防开机/瞬时误报) */
+static volatile int g_alarm_hits = 0;
+
+/** @brief 解析 BLE 收到的配网信息并连接
+ *         载荷格式: [ssid_len:1][pass_len:1][user_len:1][ssid][pass][username]
+ *         username 保存到 NVS 以供后续向服务器申请序列号 */
 static void wifi_creds_from_ble(const uint8_t *data, size_t len)
 {
-    size_t ssid_len, pass_len;
+    size_t ssid_len, pass_len, user_len;
 
-    if (len < 2) {
+    if (len < 3) {
         ESP_LOGW(TAG, "wifi creds: too short (%d bytes)", (int)len);
         return;
     }
     ssid_len = data[0];
     pass_len = data[1];
-    if (2 + ssid_len + pass_len != len) {
+    user_len = data[2];
+    if (3 + ssid_len + pass_len + user_len != len) {
         ESP_LOGW(TAG, "wifi creds: length mismatch");
         return;
     }
     if (ssid_len == 0 || ssid_len > WIFI_MAX_SSID_LEN ||
-        pass_len > WIFI_MAX_PASS_LEN) {
-        ESP_LOGW(TAG, "wifi creds: invalid len ssid=%d pass=%d",
-                 (int)ssid_len, (int)pass_len);
+        pass_len > WIFI_MAX_PASS_LEN || user_len == 0 ||
+        user_len > DEV_USERNAME_MAX) {
+        ESP_LOGW(TAG, "wifi creds: invalid len ssid=%d pass=%d user=%d",
+                 (int)ssid_len, (int)pass_len, (int)user_len);
         return;
     }
 
     char ssid[WIFI_MAX_SSID_LEN + 1] = {0};
     char pass[WIFI_MAX_PASS_LEN + 1] = {0};
+    char user[DEV_USERNAME_MAX + 1]  = {0};
 
-    memcpy(ssid, data + 2, ssid_len);
-    memcpy(pass, data + 2 + ssid_len, pass_len);
+    memcpy(ssid, data + 3, ssid_len);
+    memcpy(pass, data + 3 + ssid_len, pass_len);
+    memcpy(user, data + 3 + ssid_len + pass_len, user_len);
 
-    ESP_LOGI(TAG, "wifi creds: ssid=%s pass_len=%d", ssid, (int)pass_len);
+    dev_cfg_save_username(user);
+
+    ESP_LOGI(TAG, "wifi creds: ssid=%s pass_len=%d user=%s",
+             ssid, (int)pass_len, user);
     wifi_sta_connect(ssid, pass);
 }
 
@@ -140,14 +152,14 @@ static int to_tenths(float x)
 {
     int v = (int)(x * 10.0f + 0.5f);
 
-    if (v < 0) {
-        v = 0;
-    }
+    /* 允许负值(温度可为负); 显示层会钳位到 0 */
     if (v > 9999) {
         v = 9999;
     }
     return v;
 }
+
+static bool alarm_active(void);
 
 /** @brief 传感器任务: 常驻 core 1, 周期性调用各传感器读取函数 */
 static void sensor_task(void *arg)
@@ -213,6 +225,9 @@ static void sensor_task(void *arg)
             strcpy(s_turb, "ERR");
         }
         ESP_LOGI(TAG, "sensor(%s,%s,%s,%s)", s_temp, s_flow, s_ec, s_turb);
+
+        /* 以最近一次采样判断报警状态, 统计连续命中次数供报警任务去抖 */
+        g_alarm_hits = alarm_active() ? (g_alarm_hits + 1) : 0;
 
         vTaskDelay(pdMS_TO_TICKS(HOLD_DELAY_MS));
     }
@@ -364,7 +379,7 @@ static bool alarm_active(void)
 static void alarm_task(void *arg)
 {
     while (1) {
-        if (alarm_active()) {
+        if (g_alarm_hits >= ALARM_DEBOUNCE_SAMPLES) {
             ESP_LOGW(TAG, "!! ALARM T=%.1f F=%.1f EC=%d TURB=%d",
                      (float)g_temp / 10.0f, (float)g_flow / 10.0f,
                      g_ec, g_turb);
@@ -375,6 +390,38 @@ static void alarm_task(void *arg)
         } else {
             vTaskDelay(pdMS_TO_TICKS(ALARM_POLL_MS));
         }
+    }
+}
+
+/** @brief 设备绑定任务: 等待 WiFi 连上后向服务器申请序列号并存到 NVS */
+static void bind_task(void *arg)
+{
+    while (1) {
+        if (wifi_sta_is_connected()) {
+            if (dev_cfg_has_serial()) {
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                continue;
+            }
+            char username[DEV_USERNAME_MAX + 1] = {0};
+            esp_err_t gerr = dev_cfg_get_username(username, sizeof username);
+            if (gerr != ESP_OK || username[0] == '\0') {
+                ESP_LOGW(TAG, "no username in NVS (%s), use BLE to provision",
+                         esp_err_to_name(gerr));
+            } else {
+                char serial[DEV_SERIAL_MAX] = {0};
+                esp_err_t err = wm_http_fetch_serial(username, serial,
+                                                     sizeof serial);
+                if (err == ESP_OK && serial[0]) {
+                    dev_cfg_save_serial(serial);
+                    ESP_LOGI(TAG, "device bound, serial=%s", serial);
+                } else {
+                    ESP_LOGW(TAG,
+                             "serial fetch failed for user=%s (%s), retry in 5s",
+                             username, esp_err_to_name(err));
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
@@ -402,4 +449,5 @@ void app_main(void)
     xTaskCreatePinnedToCore(upload_task, "upload", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(alarm_task, "alarm", ALARM_TASK_STACK, NULL,
                             ALARM_TASK_PRIO, NULL, ALARM_TASK_CORE);
+    xTaskCreatePinnedToCore(bind_task, "bind", 4096, NULL, 3, NULL, 1);
 }
