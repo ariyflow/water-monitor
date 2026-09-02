@@ -26,6 +26,7 @@ extern "C" {
 #define SERVER_PORT 443
 #define SERVER_PATH "/api/sensors"
 #define SERVER_DEVICE_PATH "/api/devices"
+#define SERVER_ALARM_PATH "/api/alarms"
 
 /** 传感器上报周期(ms) */
 #define UPLOAD_PERIOD_MS 1000
@@ -54,6 +55,28 @@ esp_err_t wm_http_upload(float ph, float temperature, float flow,
  * @note  请求体: {"username":"..."}  -> POST /api/devices
  */
 esp_err_t wm_http_fetch_serial(const char *username, char *out, size_t out_size);
+
+/**
+ * @brief 向服务器上报一条报警(设备驱动, 无需登录)
+ * @param serial       设备序列号
+ * @param type         报警类型: temperature/flow/ec/turbidity
+ * @param value        触发报警的读数
+ * @param threshold    对应阈值
+ * @param ph           pH 值
+ * @param temperature  温度(℃)
+ * @param flow         水流量
+ * @param turbidity    浊度
+ * @param conductivity 电导率
+ * @param message      设备端拼好的中文描述
+ * @return ESP_OK 成功; 其他为失败
+ * @note  载荷格式: {"serial":..,"active":true,"type":..,"value":..,
+ *          "threshold":..,"ph":..,"temperature":..,"flow":..,
+ *          "turbidity":..,"conductivity":..,"message":".."}
+ */
+esp_err_t wm_http_report_alarm(const char *serial, const char *type, float value,
+                               float threshold, float ph, float temperature,
+                               float flow, float turbidity, int conductivity,
+                               const char *message);
 
 #ifdef __cplusplus
 }

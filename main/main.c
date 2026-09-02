@@ -375,11 +375,76 @@ static bool alarm_active(void)
     return temp_alarm || flow_alarm || ec_alarm || turb_alarm;
 }
 
-/** @brief 报警任务: 常驻指定核心, 超阈值时蜂鸣器"响 500ms / 停 500ms"循环 */
+/** @brief 报警明细: 取第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度) */
+typedef struct {
+    const char *type;
+    float value;
+    float threshold;
+} alarm_detail_t;
+
+static alarm_detail_t alarm_detail(void)
+{
+    float t = (float)g_temp / 10.0f;
+    float f = (float)g_flow / 10.0f;
+
+    if (g_temp != ERR_DISP && (t <= TEMP_ALARM_LOW_C || t > TEMP_ALARM_HIGH_C)) {
+        if (t <= TEMP_ALARM_LOW_C) {
+            return (alarm_detail_t){ "temperature", t, TEMP_ALARM_LOW_C };
+        }
+        return (alarm_detail_t){ "temperature", t, TEMP_ALARM_HIGH_C };
+    }
+    if (g_flow != ERR_DISP && f > FLOW_ALARM_HIGH_LPM) {
+        return (alarm_detail_t){ "flow", f, FLOW_ALARM_HIGH_LPM };
+    }
+    if (g_ec != ERR_DISP && (float)g_ec > EC_ALARM_HIGH_US_CM) {
+        return (alarm_detail_t){ "ec", (float)g_ec, EC_ALARM_HIGH_US_CM };
+    }
+    if (g_turb != ERR_DISP && (float)g_turb > TURB_ALARM_HIGH_NTU) {
+        return (alarm_detail_t){ "turbidity", (float)g_turb, TURB_ALARM_HIGH_NTU };
+    }
+    return (alarm_detail_t){ "temperature", t, TEMP_ALARM_HIGH_C };
+}
+
+static void build_alarm_message(char *buf, size_t size, const alarm_detail_t *d)
+{
+    if (!strcmp(d->type, "temperature")) {
+        snprintf(buf, size, "温度超标：%.1f℃（阈值%.1f℃）", d->value, d->threshold);
+    } else if (!strcmp(d->type, "flow")) {
+        snprintf(buf, size, "流量超标：%.2f L/min（阈值%.1f L/min）", d->value, d->threshold);
+    } else if (!strcmp(d->type, "ec")) {
+        snprintf(buf, size, "电导率超标：%.0f μS/cm（阈值%.1f μS/cm）", d->value, d->threshold);
+    } else {
+        snprintf(buf, size, "浊度超标：%.0f（阈值%.1f）", d->value, d->threshold);
+    }
+}
+
+/** @brief 报警任务: 超阈值时蜂鸣器"响 500ms / 停 500ms"循环, 并在报警上升沿上报一条 */
 static void alarm_task(void *arg)
 {
+    bool was_alarm = false;
+
     while (1) {
-        if (g_alarm_hits >= ALARM_DEBOUNCE_SAMPLES) {
+        bool now_alarm = (g_alarm_hits >= ALARM_DEBOUNCE_SAMPLES);
+
+        /* 边沿: 无报警 -> 有报警 时上报一条 (同一报警周期只报一次) */
+        if (now_alarm && !was_alarm) {
+            char serial[DEV_SERIAL_MAX] = {0};
+            dev_cfg_get_serial(serial, sizeof serial);
+            if (serial[0]) {
+                alarm_detail_t d = alarm_detail();
+                char msg[128];
+                build_alarm_message(msg, sizeof msg, &d);
+                wm_http_report_alarm(serial, d.type, d.value, d.threshold,
+                                     PH_VALUE, (float)g_temp / 10.0f,
+                                     (float)g_flow / 10.0f,
+                                     (float)g_turb, (g_ec > 0 ? g_ec : 0), msg);
+            } else {
+                ESP_LOGW(TAG, "alarm: no serial, skip server report");
+            }
+        }
+        was_alarm = now_alarm;
+
+        if (now_alarm) {
             ESP_LOGW(TAG, "!! ALARM T=%.1f F=%.1f EC=%d TURB=%d",
                      (float)g_temp / 10.0f, (float)g_flow / 10.0f,
                      g_ec, g_turb);

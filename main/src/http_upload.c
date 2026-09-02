@@ -181,3 +181,65 @@ esp_err_t wm_http_fetch_serial(const char *username, char *out, size_t out_size)
     esp_http_client_cleanup(client);
     return err;
 }
+
+esp_err_t wm_http_report_alarm(const char *serial, const char *type, float value,
+                               float threshold, float ph, float temperature,
+                               float flow, float turbidity, int conductivity,
+                               const char *message)
+{
+    char body[256];
+    char url[128];
+    int  len;
+
+    if (!serial || !serial[0]) {
+        ESP_LOGE(UPLOAD_TAG, "alarm: no serial");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    len = snprintf(
+        body, sizeof body,
+        "{\"serial\":\"%s\",\"active\":true,\"type\":\"%s\",\"value\":%.2f,"
+        "\"threshold\":%.2f,\"ph\":%.1f,\"temperature\":%.2f,\"flow\":%.2f,"
+        "\"turbidity\":%.0f,\"conductivity\":%d,\"message\":\"%s\"}",
+        serial, type ? type : "", (double)value, (double)threshold, (double)ph,
+        (double)temperature, (double)flow, (double)turbidity, conductivity,
+        message ? message : "");
+    if (len <= 0 || len >= (int)sizeof body) {
+        ESP_LOGE(UPLOAD_TAG, "alarm json too long (%d)", len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    snprintf(url, sizeof url, "%s://%s:%d%s", SERVER_SCHEME, SERVER_HOST,
+             SERVER_PORT, SERVER_ALARM_PATH);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(UPLOAD_TAG, "alarm: http client init failed");
+        return ESP_FAIL;
+    }
+
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, len);
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        ESP_LOGI(UPLOAD_TAG, "alarm POST %s -> %d", url, status);
+        if (status < 200 || status >= 300) {
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGW(UPLOAD_TAG, "alarm POST %s failed: %s", url,
+                 esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    return err;
+}
