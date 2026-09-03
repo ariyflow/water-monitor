@@ -80,6 +80,26 @@ extern "C" {
 #define ALARM_TASK_CORE  0          /**< 报警任务绑定核心(0/1) */
 #define ALARM_TASK_STACK 4096       /**< 报警任务栈大小(字节) */
 
+/* ====================== 7. 运行时阈值参数 ====================== */
+/*
+ * 上述宏为出厂默认阈值。设备上电后可向服务器拉取该设备独立的阈值
+ * (GET /api/settings), 覆盖下面的运行时值; 拉取失败时沿用宏默认值。
+ *
+ * 每个阈值以独立的 volatile float 保存于 main.c, 单字段读/写在 Xtensa 上
+ * 为单条 32bit 存取, 无撕裂。settings_task 逐字段写入, 各读任务逐字段读取,
+ * 某次采样可能出现"个别字段已更新/其余未更新"的瞬时混合, 对报警判断无害。
+ *
+ * alarm_params_t 仅作为 HTTP 拉取函数 (wm_http_fetch_thresholds) 的输出结构,
+ * 便于一次性取得全部阈值后再逐字段写入运行时变量。
+ */
+typedef struct {
+    float temp_low_c;    /**< 温度下限(℃): 实际温度 <= 此值报警 */
+    float temp_high_c;   /**< 温度上限(℃): 实际温度 > 此值报警 */
+    float flow_high_lpm; /**< 流量上限(L/min): 实际流量 > 此值报警 */
+    float ec_high_us_cm; /**< 电导率上限(μS/cm): 实际电导率 > 此值报警 */
+    float turb_high_ntu; /**< 浊度上限(NTU): 实际浊度 > 此值报警 */
+} alarm_params_t;
+
 #ifdef __cplusplus
 }
 #endif

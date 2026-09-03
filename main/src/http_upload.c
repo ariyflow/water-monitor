@@ -182,6 +182,81 @@ esp_err_t wm_http_fetch_serial(const char *username, char *out, size_t out_size)
     return err;
 }
 
+esp_err_t wm_http_fetch_thresholds(const char *serial, alarm_params_t *out)
+{
+    esp_err_t err = ESP_FAIL;
+    char url[160];
+    http_body_t resp = {0};
+
+    if (!serial || serial[0] == '\0' || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(url, sizeof url, "%s://%s:%d%s?serial=%s", SERVER_SCHEME,
+             SERVER_HOST, SERVER_PORT, SERVER_SETTINGS_PATH, serial);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .event_handler = body_event_handler,
+        .user_data = &resp,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(UPLOAD_TAG, "settings: http client init failed");
+        return ESP_FAIL;
+    }
+
+    esp_err_t perf = esp_http_client_perform(client);
+    if (perf == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        ESP_LOGI(UPLOAD_TAG, "settings GET %s -> %d", url, status);
+        if (status >= 200 && status < 300) {
+            cJSON *root = cJSON_Parse(resp.buf);
+            if (root) {
+                cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+                float val;
+                if (!data) {
+                    ESP_LOGW(UPLOAD_TAG, "settings: no data in resp: %s",
+                             resp.buf);
+                } else {
+                    cJSON *it = cJSON_GetObjectItemCaseSensitive(data, "temp_low_c");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->temp_low_c;
+                    out->temp_low_c = val;
+                    it = cJSON_GetObjectItemCaseSensitive(data, "temp_high_c");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->temp_high_c;
+                    out->temp_high_c = val;
+                    it = cJSON_GetObjectItemCaseSensitive(data, "flow_high_lpm");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->flow_high_lpm;
+                    out->flow_high_lpm = val;
+                    it = cJSON_GetObjectItemCaseSensitive(data, "ec_high_us_cm");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->ec_high_us_cm;
+                    out->ec_high_us_cm = val;
+                    it = cJSON_GetObjectItemCaseSensitive(data, "turb_high_ntu");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->turb_high_ntu;
+                    out->turb_high_ntu = val;
+                    err = ESP_OK;
+                }
+                cJSON_Delete(root);
+            } else {
+                ESP_LOGW(UPLOAD_TAG, "settings: bad json: %s", resp.buf);
+            }
+        } else {
+            ESP_LOGW(UPLOAD_TAG, "settings: http status %d: %s", status,
+                     resp.buf);
+        }
+    } else {
+        ESP_LOGW(UPLOAD_TAG, "settings GET %s failed: %s", url,
+                 esp_err_to_name(perf));
+    }
+
+    esp_http_client_cleanup(client);
+    return err;
+}
+
 esp_err_t wm_http_report_alarm(const char *serial, const char *type, float value,
                                float threshold, float ph, float temperature,
                                float flow, float turbidity, int conductivity,

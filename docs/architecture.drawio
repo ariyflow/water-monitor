@@ -1,0 +1,82 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="water_monitor_struct" name="模块结构">
+    <mxGraphModel dx="1413" dy="920" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1540" pageHeight="820" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="m_entry" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;fontSize=13;" value="main" vertex="1">
+          <mxGeometry height="60" width="480" x="520" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="c_sensor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=14;verticalAlign=top;spacingTop=8;" value="传感器模块" vertex="1">
+          <mxGeometry height="370" width="460" x="40" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="c_ui" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=14;verticalAlign=top;spacingTop=8;" value="外设模块" vertex="1">
+          <mxGeometry height="370" width="460" x="530" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="c_comm" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=14;verticalAlign=top;spacingTop=8;" value="通信模块" vertex="1">
+          <mxGeometry height="370" width="460" x="1020" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="m_ds" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" value="ds18b20.h / .c&#xa;温度 · 1-Wire / GPIO5" vertex="1">
+          <mxGeometry height="50" width="160" x="70" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="m_yf" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" value="yf_s201.h / .c&#xa;水流量 · 脉冲计数 / GPIO6" vertex="1">
+          <mxGeometry height="50" width="160" x="270" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="m_ec" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" value="ec.h / .c&#xa;EC 电导率 · ADC1_CH3 / GPIO4" vertex="1">
+          <mxGeometry height="50" width="160" x="70" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="m_turb" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" value="turbidity.h / .c&#xa;浊度 · ADC1_CH6 / GPIO7" vertex="1">
+          <mxGeometry height="50" width="160" x="270" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="m_adc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eaf2f8;strokeColor=#7ea6c0;strokeDashArray=6 3;fontStyle=1;fontSize=12;" value="adc1_common&lt;div&gt;ADC1 兼容层&lt;/div&gt;" vertex="1">
+          <mxGeometry height="50" width="360" x="70" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="m_seg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" value="seg.h / .c&#xa;数码管 · 位选 IO11/12 段选多IO" vertex="1">
+          <mxGeometry height="50" width="400" x="560" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="m_led" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" value="led.h / .c&#xa;LED 指示灯 · A0-A2 IO35/36/37" vertex="1">
+          <mxGeometry height="50" width="400" x="560" y="285" as="geometry" />
+        </mxCell>
+        <mxCell id="m_key" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" value="key.h / .c&#xa;按键 · SW1 IO48 / SW2 IO45" vertex="1">
+          <mxGeometry height="50" width="400" x="560" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="m_buz" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" value="buzzer.h / .c&#xa;蜂鸣器 · IO2 高电平鸣响" vertex="1">
+          <mxGeometry height="50" width="400" x="560" y="435" as="geometry" />
+        </mxCell>
+        <mxCell id="m_ble" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" value="ble.h&lt;div&gt;BLE 配网 · 广播 + 收 WiFi 凭据&lt;/div&gt;" vertex="1">
+          <mxGeometry height="50" width="400" x="1050" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="m_wifi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" value="wifi_sta&lt;br&gt;WiFi STA · 连接 &amp;amp; 状态查询" vertex="1">
+          <mxGeometry height="50" width="400" x="1050" y="285" as="geometry" />
+        </mxCell>
+        <mxCell id="m_http" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" value="http_upload&lt;br&gt;HTTP · 上报/绑定/报警 API" vertex="1">
+          <mxGeometry height="50" width="400" x="1050" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="m_dev" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" value="device_cfg&lt;br&gt;NVS 配置 · 用户名/序列号" vertex="1">
+          <mxGeometry height="50" width="400" x="1050" y="435" as="geometry" />
+        </mxCell>
+        <mxCell id="e_main_sensor" edge="1" parent="1" source="m_entry" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;dashed=1;" target="c_sensor" value="调用">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_main_ui" edge="1" parent="1" source="m_entry" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;dashed=1;" target="c_ui" value="调用">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_main_comm" edge="1" parent="1" source="m_entry" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;dashed=1;" target="c_comm" value="调用">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="Zk5uo1Qlv2YF3ssRA_vx-2" edge="1" parent="1" source="m_adc" style="endArrow=classic;html=1;rounded=0;exitX=0.226;exitY=1.015;exitDx=0;exitDy=0;exitPerimeter=0;" target="m_ec" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="150" y="330" as="sourcePoint" />
+            <mxPoint x="430" y="440" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="Zk5uo1Qlv2YF3ssRA_vx-3" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=0.226;exitY=1.015;exitDx=0;exitDy=0;exitPerimeter=0;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="349.86" y="331" as="sourcePoint" />
+            <mxPoint x="349.86" y="350" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

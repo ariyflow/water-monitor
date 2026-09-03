@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include "esp_err.h"
+#include "alarm_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,7 @@ extern "C" {
 #define SERVER_PATH "/api/sensors"
 #define SERVER_DEVICE_PATH "/api/devices"
 #define SERVER_ALARM_PATH "/api/alarms"
+#define SERVER_SETTINGS_PATH "/api/settings"
 
 /** 传感器上报周期(ms) */
 #define UPLOAD_PERIOD_MS 1000
@@ -77,6 +79,17 @@ esp_err_t wm_http_report_alarm(const char *serial, const char *type, float value
                                float threshold, float ph, float temperature,
                                float flow, float turbidity, int conductivity,
                                const char *message);
+
+/**
+ * @brief 向服务器拉取该设备的报警阈值
+ * @param serial 设备序列号
+ * @param out    输出的阈值结构 (应非空)
+ * @return ESP_OK 成功并填充 out; 其他为失败(含非 2xx、解析失败)
+ * @note  请求: GET /api/settings?serial=...
+ *        成功填充全部字段; 任一字段缺失时保留 out 中原值(为 NULL 时清零)。
+ *        未配置时服务器返回固件默认值。
+ */
+esp_err_t wm_http_fetch_thresholds(const char *serial, alarm_params_t *out);
 
 #ifdef __cplusplus
 }

@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
 #include "seg.h"
 #include "ds18b20.h"
@@ -58,6 +59,9 @@
 #define HOLD_DELAY_MS       250 /**< 传感器两次采样间间隔 */
 
 #define ERR_DISP (-32768) /**< 共享值中表示读取失败的标志: 取不可能出现的值, 避免与合法负温度(-1)冲突 */
+
+#define SETTINGS_REFRESH_MS (5 * 60 * 1000) /**< 阈值从服务器拉取的刷新周期(ms) */
+#define SYNC_OK_BEEP_MS 200                 /**< 手动同步成功后短鸣时长(ms) */
 
 #define LED_TEMP 0x01 /**< 指示位: 数码管显示温度 */
 #define LED_FLOW 0x02 /**< 指示位: 数码管显示水流量 */
@@ -100,6 +104,36 @@ static volatile int g_turb = 0;
 
 /** @brief 报警去抖计数: 连续多少次采样满足报警条件才真正鸣响(防开机/瞬时误报) */
 static volatile int g_alarm_hits = 0;
+
+/* 运行时阈值: 初始为 alarm_config.h 宏默认值, settings_task 从服务器拉取后覆盖。
+ * 各字段为独立 volatile float, 单字段读/写原子; 拉取失败时保留原值(回退默认)。 */
+static volatile float s_temp_low_c     = TEMP_ALARM_LOW_C;
+static volatile float s_temp_high_c    = TEMP_ALARM_HIGH_C;
+static volatile float s_flow_high_lpm  = FLOW_ALARM_HIGH_LPM;
+static volatile float s_ec_high_us_cm  = EC_ALARM_HIGH_US_CM;
+static volatile float s_turb_high_ntu  = TURB_ALARM_HIGH_NTU;
+
+/** @brief 报警明细: 描述第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度) */
+typedef struct {
+    const char *type;
+    float value;
+    float threshold;
+} alarm_detail_t;
+
+static alarm_detail_t alarm_detail(void);
+
+/** @brief 触发快照: 在 sensor_task 里, 当去抖计数恰好达到阈值(本次确认超限)时记录当时的读数。
+ *        后续 alarm_task 上报时用它, 避免因上报时机滞后而回落到阈值以下的值。
+ *        valid 置位后不再清除: 历史记录仅在"本次报警上升沿"读取, 而该上升沿对应的触发时刻
+ *        必然已刷新过快照, 故不会读到陈旧值。 */
+static alarm_detail_t s_alarm_trigger;
+static volatile bool  s_alarm_trigger_valid = false;
+
+/* 阈值同步请求队列: control_task 检测到 KEY_2 时发送一次手动同步请求;
+ * settings_task 在其上等待, 收到请求即"立即手动同步"并成功后蜂鸣, 等待超时则"周期同步"。 */
+static QueueHandle_t s_settings_q = NULL;
+
+static void settings_request_sync(void);
 
 /** @brief 解析 BLE 收到的配网信息并连接
  *         载荷格式: [ssid_len:1][pass_len:1][user_len:1][ssid][pass][username]
@@ -227,8 +261,14 @@ static void sensor_task(void *arg)
         }
         ESP_LOGI(TAG, "sensor(%s,%s,%s,%s)", s_temp, s_flow, s_ec, s_turb);
 
-        /* 以最近一次采样判断报警状态, 统计连续命中次数供报警任务去抖 */
-        g_alarm_hits = alarm_active() ? (g_alarm_hits + 1) : 0;
+        /* 以最近一次采样判断报警状态, 统计连续命中次数供报警任务去抖;
+         * 恰好达到去抖阈值时, 记录触发时刻的读数快照, 供上报使用 */
+        int next_hits = alarm_active() ? (g_alarm_hits + 1) : 0;
+        if (next_hits == ALARM_DEBOUNCE_SAMPLES) {
+            s_alarm_trigger = alarm_detail();
+            s_alarm_trigger_valid = true;
+        }
+        g_alarm_hits = next_hits;
 
         vTaskDelay(pdMS_TO_TICKS(HOLD_DELAY_MS));
     }
@@ -297,6 +337,10 @@ static void control_task(void *arg)
             }
         }
 
+        if (key_scan_edge(KEY_2)) {
+            settings_request_sync(); /* 手动同步阈值 */
+        }
+
         /* 组装 LED 指示: 当前显示项 + 蓝牙指示 + WiFi 状态(LED6, 常亮=已连接) */
         uint8_t led_mask = SEL_LED[sel] | (ble_on ? LED_BLE : 0) |
                            (wifi_sta_is_connected() ? LED_WIFI : 0);
@@ -360,57 +404,119 @@ static void upload_task(void *arg)
     }
 }
 
+/** @brief 请求一次手动阈值同步 (KEY_2 按下时由控制任务调用, 非阻塞) */
+static void settings_request_sync(void)
+{
+    if (s_settings_q == NULL) {
+        return;
+    }
+    uint32_t token = 1;
+    xQueueSend(s_settings_q, &token, 0);
+}
+
+/** @brief 阈值同步任务: 开机后拉取一次, 之后按周期刷新; KEY_2 按下会立即手动同步,
+ *          同步成功时若为手动触发则短鸣一声提示 */
+static void settings_task(void *arg)
+{
+    ESP_LOGI(TAG, "settings task started");
+
+    /* 给 WiFi 连上与设备绑定留出时间, 再开始拉取 */
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    while (1) {
+        /* 等待下一次同步: 收到 KEY_2 请求 -> 立即手动同步; 超时 -> 周期同步。
+         * 前者成功后短鸣提示, 后者静默。 */
+        bool beep_on_success = false;
+        uint32_t token = 0;
+
+        if (xQueueReceive(s_settings_q, &token,
+                          pdMS_TO_TICKS(SETTINGS_REFRESH_MS)) == pdTRUE) {
+            beep_on_success = true;
+            while (xQueueReceive(s_settings_q, &token, 0) == pdTRUE) {
+                beep_on_success = true; /* 连续按下仅视为一次手动同步 */
+            }
+        }
+
+        if (wifi_sta_is_connected()) {
+            char serial[DEV_SERIAL_MAX] = {0};
+            dev_cfg_get_serial(serial, sizeof serial);
+            if (serial[0]) {
+                alarm_params_t p = {
+                    .temp_low_c     = s_temp_low_c,
+                    .temp_high_c    = s_temp_high_c,
+                    .flow_high_lpm  = s_flow_high_lpm,
+                    .ec_high_us_cm  = s_ec_high_us_cm,
+                    .turb_high_ntu  = s_turb_high_ntu,
+                };
+                if (wm_http_fetch_thresholds(serial, &p) == ESP_OK) {
+                    s_temp_low_c    = p.temp_low_c;
+                    s_temp_high_c   = p.temp_high_c;
+                    s_flow_high_lpm = p.flow_high_lpm;
+                    s_ec_high_us_cm = p.ec_high_us_cm;
+                    s_turb_high_ntu = p.turb_high_ntu;
+                    ESP_LOGI(TAG,
+                             "thresholds: T=[%.1f,%.1f] F=%.1f EC=%.0f TURB=%.0f",
+                             s_temp_low_c, s_temp_high_c, s_flow_high_lpm,
+                             s_ec_high_us_cm, s_turb_high_ntu);
+                    if (beep_on_success) {
+                        /* 手动同步成功: 短鸣一声 */
+                        start_beep();
+                        vTaskDelay(pdMS_TO_TICKS(SYNC_OK_BEEP_MS));
+                        stop_beep();
+                    }
+                } else if (beep_on_success) {
+                    ESP_LOGW(TAG, "manual sync failed, no beep");
+                }
+            }
+        }
+    }
+}
+
 /** @brief 判断当前传感器数据是否超出阈值(任一超限即报警) */
 static bool alarm_active(void)
 {
     /* 温度: 读取失败(ERR_DISP)不参与判断; 实际温度 = g_temp/10 */
     bool temp_alarm = (g_temp != ERR_DISP) &&
-        ((float)g_temp / 10.0f <= TEMP_ALARM_LOW_C ||
-         (float)g_temp / 10.0f >  TEMP_ALARM_HIGH_C);
+        ((float)g_temp / 10.0f <= s_temp_low_c ||
+         (float)g_temp / 10.0f >  s_temp_high_c);
 
     /* 流量: 实际流量 = g_flow/10 (L/min) */
     bool flow_alarm = (g_flow != ERR_DISP) &&
-        ((float)g_flow / 10.0f > FLOW_ALARM_HIGH_LPM);
+        ((float)g_flow / 10.0f > s_flow_high_lpm);
 
     /* 电导率: g_ec 已是整数 μS/cm */
     bool ec_alarm = (g_ec != ERR_DISP) &&
-        ((float)g_ec > EC_ALARM_HIGH_US_CM);
+        ((float)g_ec > s_ec_high_us_cm);
 
     /* 浊度: g_turb 已是整数 0~100 */
     bool turb_alarm = (g_turb != ERR_DISP) &&
-        ((float)g_turb > TURB_ALARM_HIGH_NTU);
+        ((float)g_turb > s_turb_high_ntu);
 
     return temp_alarm || flow_alarm || ec_alarm || turb_alarm;
 }
 
-/** @brief 报警明细: 取第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度) */
-typedef struct {
-    const char *type;
-    float value;
-    float threshold;
-} alarm_detail_t;
-
+/** @brief 取第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度) */
 static alarm_detail_t alarm_detail(void)
 {
     float t = (float)g_temp / 10.0f;
     float f = (float)g_flow / 10.0f;
 
-    if (g_temp != ERR_DISP && (t <= TEMP_ALARM_LOW_C || t > TEMP_ALARM_HIGH_C)) {
-        if (t <= TEMP_ALARM_LOW_C) {
-            return (alarm_detail_t){ "temperature", t, TEMP_ALARM_LOW_C };
+    if (g_temp != ERR_DISP && (t <= s_temp_low_c || t > s_temp_high_c)) {
+        if (t <= s_temp_low_c) {
+            return (alarm_detail_t){ "temperature", t, s_temp_low_c };
         }
-        return (alarm_detail_t){ "temperature", t, TEMP_ALARM_HIGH_C };
+        return (alarm_detail_t){ "temperature", t, s_temp_high_c };
     }
-    if (g_flow != ERR_DISP && f > FLOW_ALARM_HIGH_LPM) {
-        return (alarm_detail_t){ "flow", f, FLOW_ALARM_HIGH_LPM };
+    if (g_flow != ERR_DISP && f > s_flow_high_lpm) {
+        return (alarm_detail_t){ "flow", f, s_flow_high_lpm };
     }
-    if (g_ec != ERR_DISP && (float)g_ec > EC_ALARM_HIGH_US_CM) {
-        return (alarm_detail_t){ "ec", (float)g_ec, EC_ALARM_HIGH_US_CM };
+    if (g_ec != ERR_DISP && (float)g_ec > s_ec_high_us_cm) {
+        return (alarm_detail_t){ "ec", (float)g_ec, s_ec_high_us_cm };
     }
-    if (g_turb != ERR_DISP && (float)g_turb > TURB_ALARM_HIGH_NTU) {
-        return (alarm_detail_t){ "turbidity", (float)g_turb, TURB_ALARM_HIGH_NTU };
+    if (g_turb != ERR_DISP && (float)g_turb > s_turb_high_ntu) {
+        return (alarm_detail_t){ "turbidity", (float)g_turb, s_turb_high_ntu };
     }
-    return (alarm_detail_t){ "temperature", t, TEMP_ALARM_HIGH_C };
+    return (alarm_detail_t){ "temperature", t, s_temp_high_c };
 }
 
 static void build_alarm_message(char *buf, size_t size, const alarm_detail_t *d)
@@ -439,7 +545,8 @@ static void alarm_task(void *arg)
             char serial[DEV_SERIAL_MAX] = {0};
             dev_cfg_get_serial(serial, sizeof serial);
             if (serial[0]) {
-                alarm_detail_t d = alarm_detail();
+                alarm_detail_t d = s_alarm_trigger_valid ? s_alarm_trigger
+                                                         : alarm_detail();
                 char msg[128];
                 build_alarm_message(msg, sizeof msg, &d);
                 wm_http_report_alarm(serial, d.type, d.value, d.threshold,
@@ -517,9 +624,12 @@ void app_main(void)
 
     wifi_sta_init();
 
+    s_settings_q = xQueueCreate(1, sizeof(uint32_t));
+
     xTaskCreatePinnedToCore(sensor_task, "sensor", 4096, NULL, 4, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "control", 2048, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(upload_task, "upload", 4096, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(settings_task, "settings", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(alarm_task, "alarm", ALARM_TASK_STACK, NULL,
                             ALARM_TASK_PRIO, NULL, ALARM_TASK_CORE);
     xTaskCreatePinnedToCore(bind_task, "bind", 4096, NULL, 3, NULL, 1);
