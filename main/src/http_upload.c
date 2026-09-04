@@ -52,20 +52,18 @@ esp_err_t wm_http_upload(float ph, float temperature, float flow,
 
     dev_cfg_get_serial(serial, sizeof serial);
 
-    /* 已绑定序列号则上报 serial 字段; 否则回退到固定 deviceid */
-    if (serial[0]) {
-        len = snprintf(
-            body, sizeof body,
-            "{\"serial\":\"%s\",\"ph\":%.1f,\"temperature\":%.2f,"
-            "\"flow\":%.2f,\"turbidity\":%.0f,\"conductivity\":%d}",
-            serial, ph, temperature, flow, turbidity, conductivity);
-    } else {
-        len = snprintf(
-            body, sizeof body,
-            "{\"deviceid\":\"%s\",\"ph\":%.1f,\"temperature\":%.2f,"
-            "\"flow\":%.2f,\"turbidity\":%.0f,\"conductivity\":%d}",
-            DEVICE_ADDR, ph, temperature, flow, turbidity, conductivity);
+    /* 未绑定序列号时不上报: 避免回退到固定 deviceid(A5A5...)导致服务器 404,
+     * 进而走下面的"清号"把 bind_task 刚写入的序列号擦掉, 造成反复重绑。 */
+    if (!serial[0]) {
+        ESP_LOGI(UPLOAD_TAG, "no serial, skip upload");
+        return ESP_OK;
     }
+
+    len = snprintf(
+        body, sizeof body,
+        "{\"serial\":\"%s\",\"ph\":%.1f,\"temperature\":%.2f,"
+        "\"flow\":%.2f,\"turbidity\":%.0f,\"conductivity\":%d}",
+        serial, ph, temperature, flow, turbidity, conductivity);
     if (len <= 0 || len >= (int)sizeof body) {
         ESP_LOGE(UPLOAD_TAG, "json too long (%d)", len);
         return ESP_ERR_INVALID_SIZE;

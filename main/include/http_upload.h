@@ -2,9 +2,10 @@
  * @file http_upload.h
  * @brief 通过 HTTP POST 将传感器数据上报到服务器
  *
- * 服务器 API: POST http://<host>:<port>/api/sensors
- * 请求体: {"deviceid":..., "ph":..., "temperature":...,
+ * 服务器 API: POST https://<host>:<port>/api/sensors
+ * 请求体: {"serial":..., "ph":..., "temperature":...,
  *          "flow":..., "turbidity":..., "conductivity":...}
+ * 设备需先经 /api/devices 绑定序列号并存到 NVS; 未绑定则跳过上报。
  */
 
 #ifndef __HTTP_UPLOAD_H__
@@ -17,9 +18,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/** 设备地址 (固定) */
-#define DEVICE_ADDR "A5A5A5A5A5A5"
 
 /** 服务器地址 */
 #define SERVER_SCHEME "https"
