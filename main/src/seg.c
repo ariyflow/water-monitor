@@ -13,8 +13,8 @@ static const uint8_t SEG_CODE[16] = {
 
 /** 段选引脚, 顺序为 a b c d e f g dp */
 static const gpio_num_t SEG_PINS[8] = {
-    GPIO_NUM_18, GPIO_NUM_16, GPIO_NUM_9, GPIO_NUM_3,
-    GPIO_NUM_8,  GPIO_NUM_17, GPIO_NUM_10, GPIO_NUM_46
+    GPIO_NUM_18, GPIO_NUM_16, GPIO_NUM_11, GPIO_NUM_3,
+    GPIO_NUM_8,  GPIO_NUM_17, GPIO_NUM_12, GPIO_NUM_46
 };
 
 static uint8_t seg_idx[4];     /**< 4 位译码表索引 (0~15) */

@@ -3,11 +3,11 @@
  * @brief 4 位 7 段共阴数码管驱动(74HC138 位选译码 + GPIO 段选)
  *
  * 硬件连接:
- *   - 位选: 74HC138 A0 -> IO11, A1 -> IO12, A2 接地(只用 Y0~Y3)
+ *   - 位选: 74HC138 A0 -> IO13, A1 -> IO14, A2 接地(只用 Y0~Y3)
  *           Y0 -> G1(第1位), Y1 -> G2(第2位), Y2 -> G3(第3位), Y3 -> G4(第4位)
  *   - 段选: 共阴数码管, 段码引脚为高电平点亮
- *           a -> IO18, b -> IO16, c -> IO9,  d -> IO3
- *           e -> IO8,  f -> IO17, g -> IO10, dp -> IO46
+ *           a -> IO18, b -> IO16, c -> IO11, d -> IO3
+ *           e -> IO8,  f -> IO17, g -> IO12, dp -> IO46
  *
  * 译码表(段码, bit0=a, bit1=b, bit2=c, bit3=d, bit4=e, bit5=f, bit6=g, bit7=dp):
  *   索引 0~9 对应数字 0~9, 索引 10~15 对应 A~F
@@ -49,8 +49,8 @@
 extern "C" {
 #endif
 
-#define SEG_DIG_A0_PIN   GPIO_NUM_11
-#define SEG_DIG_A1_PIN   GPIO_NUM_12
+#define SEG_DIG_A0_PIN   GPIO_NUM_13
+#define SEG_DIG_A1_PIN   GPIO_NUM_14
 
 /**
  * @brief 初始化数码管引脚(位选 2 根 + 段选 8 根全部配置为推挽输出)
