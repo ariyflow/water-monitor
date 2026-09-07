@@ -180,6 +180,54 @@ esp_err_t wm_http_fetch_serial(const char *username, char *out, size_t out_size)
     return err;
 }
 
+esp_err_t wm_http_delete_device(const char *serial, const char *username)
+{
+    esp_err_t err = ESP_FAIL;
+    char body[128];
+    char url[160];
+    http_body_t resp = {0};
+
+    if (!serial || serial[0] == '\0' || !username || username[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(body, sizeof body, "{\"username\":\"%s\"}", username);
+    snprintf(url, sizeof url, "%s://%s:%d%s/%s", SERVER_SCHEME, SERVER_HOST,
+             SERVER_PORT, SERVER_DEVICE_PATH, serial);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_DELETE,
+        .timeout_ms = HTTP_TIMEOUT_MS,
+        .event_handler = body_event_handler,
+        .user_data = &resp,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(UPLOAD_TAG, "delete device: http client init failed");
+        return ESP_FAIL;
+    }
+
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, body, strlen(body));
+
+    esp_err_t perf = esp_http_client_perform(client);
+    if (perf == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        ESP_LOGI(UPLOAD_TAG, "delete device %s -> %d", url, status);
+        if (status >= 200 && status < 300) {
+            err = ESP_OK;
+        }
+    } else {
+        ESP_LOGW(UPLOAD_TAG, "delete device failed: %s", esp_err_to_name(perf));
+    }
+
+    esp_http_client_cleanup(client);
+    return err;
+}
+
 esp_err_t wm_http_fetch_thresholds(const char *serial, alarm_params_t *out)
 {
     esp_err_t err = ESP_FAIL;

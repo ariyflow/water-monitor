@@ -54,6 +54,15 @@ esp_err_t wm_http_upload(float ph, float temperature, float flow,
 esp_err_t wm_http_fetch_serial(const char *username, char *out, size_t out_size);
 
 /**
+ * @brief 设备自删: 删除服务器上的设备及其数据(需用户名鉴权)
+ * @param serial   设备序列号
+ * @param username 设备归属的用户名(鉴权用)
+ * @return ESP_OK 成功; 其他为失败(含 HTTP 非 2xx、用户名不匹配)
+ * @note  请求: DELETE /api/devices/<serial>, body: {"username":"..."}
+ */
+esp_err_t wm_http_delete_device(const char *serial, const char *username);
+
+/**
  * @brief 向服务器上报一条报警(设备驱动, 无需登录)
  * @param serial       设备序列号
  * @param type         报警类型: temperature/flow/ec/turbidity/ph

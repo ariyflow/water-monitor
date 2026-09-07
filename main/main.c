@@ -10,7 +10,8 @@
  *   - 数码管: 见 seg.h (位选 IO13/14, 段选 IO18/16/11/3/8/17/12/46)
  *   - PH 模拟:   GPIO9 (ADC1_CH8, 见 ph.h)
  *   - LED:   见 led.h (A0/A1/A2 -> IO35/36/37)
- *   - 按键:  SW1 -> IO48 (key.h KEY_0), SW2 -> IO45 (key.h KEY_1, 蓝牙开关)
+ *   - 按键:  SW1 -> IO48 (key.h KEY_0), SW2 -> IO45 (key.h KEY_1, 蓝牙开关),
+ *            KEY_2 -> IO21 (阈值同步), KEY_3 -> IO47 (长按 3s 重置 WiFi/用户/云端)
  *   - 蜂鸣器: 见 buzzer.h (IO2, 高电平鸣响)
  *
  * 软件结构: 双核分工
@@ -29,6 +30,11 @@
  *   - 开机默认关闭蓝牙(不广播), 按 SW2(KEY_1) 开/关蓝牙
  *   - 蓝牙开启时 LED7(0x80) 点亮, 关闭后熄灭
  *
+ * 重置 (KEY_3 长按 3 秒):
+ *   - 若已绑定设备: 先带用户名鉴权删除云端设备及数据, 成功才继续; 失败则中止(不清空)。
+ *   - 清除 NVS 中的 WiFi 凭据与用户名/序列号, 蜂鸣一声提示, 随后重启进入未配网状态。
+ *   - 重置后 BLE 保持关闭(需再按 SW2 开启)。
+ *
  * 显示格式: 温度/流量 XX.X, PH XX.XX, EC 整数(μS/cm), 浊度整数(0~100); 失败显示 "EEEE"
  */
 
@@ -40,6 +46,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_system.h"
 #include "seg.h"
 #include "ds18b20.h"
 #include "yf_s201.h"
@@ -141,8 +149,31 @@ static volatile bool  s_alarm_trigger_valid = false;
 /* 阈值同步请求队列: control_task 检测到 KEY_2 时发送一次手动同步请求;
  * settings_task 在其上等待, 收到请求即"立即手动同步"并成功后蜂鸣, 等待超时则"周期同步"。 */
 static QueueHandle_t s_settings_q = NULL;
+static QueueHandle_t s_reset_q   = NULL;
 
 static void settings_request_sync(void);
+static void reset_request(void);
+
+#define KEY3_LONG_PRESS_MS 3000 /**< KEY3 长按时长(ms)触发重置 */
+
+/** @brief 蜂鸣一次(清空完成提示) */
+static void beep_once(void)
+{
+    start_beep();
+    vTaskDelay(pdMS_TO_TICKS(200));
+    stop_beep();
+}
+
+/** @brief 蜂鸣三短声(重置被中止的失败提示) */
+static void beep_error(void)
+{
+    for (int i = 0; i < 3; i++) {
+        start_beep();
+        vTaskDelay(pdMS_TO_TICKS(80));
+        stop_beep();
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+}
 
 /** @brief 解析 BLE 收到的配网信息并连接
  *         载荷格式: [ssid_len:1][pass_len:1][user_len:1][ssid][pass][username]
@@ -339,6 +370,81 @@ static void display_value(int v, int point)
     set_point(point);
 }
 
+/** @brief 请求一次重置 (KEY3 长按触发时由控制任务调用, 非阻塞) */
+static void reset_request(void)
+{
+    if (s_reset_q == NULL) {
+        return;
+    }
+    uint32_t token = 1;
+    xQueueSend(s_reset_q, &token, 0);
+}
+
+/** @brief KEY3 长按检测: 按住满 KEY3_LONG_PRESS_MS 触发一次重置请求 */
+static void key3_long_press_scan(void)
+{
+    static int64_t press_start_us = 0;
+    static bool    tracking = false;
+    static bool    fired = false;
+
+    if (is_key_down(KEY_3)) {
+        if (!tracking) {
+            tracking = true;
+            fired = false;
+            press_start_us = esp_timer_get_time();
+        } else if (!fired &&
+                   (esp_timer_get_time() - press_start_us) >=
+                       (int64_t)KEY3_LONG_PRESS_MS * 1000LL) {
+            fired = true;
+            reset_request();
+        }
+    } else {
+        tracking = false;
+        fired = false;
+    }
+}
+
+/** @brief 重置任务: 收到请求后, 先云端删除设备(鉴权), 成功才清空本地并重启 */
+static void reset_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        uint32_t token;
+        if (xQueueReceive(s_reset_q, &token, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        char serial[DEV_SERIAL_MAX] = {0};
+        char username[DEV_USERNAME_MAX + 1] = {0};
+        bool has_serial = (dev_cfg_get_serial(serial, sizeof serial) == ESP_OK &&
+                           serial[0] != '\0');
+        dev_cfg_get_username(username, sizeof username);
+
+        /* 已绑定设备: 必须先删除云端设备及数据, 失败则中止, 不清空本地 */
+        if (has_serial) {
+            if (!wifi_sta_is_connected()) {
+                ESP_LOGW(TAG, "reset aborted: wifi not connected, cannot delete device");
+                beep_error();
+                continue;
+            }
+            if (wm_http_delete_device(serial, username) != ESP_OK) {
+                ESP_LOGW(TAG, "reset aborted: delete device failed");
+                beep_error();
+                continue;
+            }
+            ESP_LOGI(TAG, "device %s deleted on cloud", serial);
+        }
+
+        wifi_sta_clear();
+        dev_cfg_clear();
+        ESP_LOGI(TAG, "local config cleared, rebooting...");
+        beep_once();
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_restart();
+    }
+}
+
 /** @brief 控制任务: 常驻 core 0, 按键扫描 + 显示切换 + 蓝牙开关 + 数码管/LED 扫描 */
 static void control_task(void *arg)
 {
@@ -365,6 +471,8 @@ static void control_task(void *arg)
         if (key_scan_edge(KEY_2)) {
             settings_request_sync(); /* 手动同步阈值 */
         }
+
+        key3_long_press_scan(); /* KEY3 长按 -> 重置 WiFi/用户/云端数据 */
 
         /* 组装 LED 指示: 当前显示项 + 蓝牙指示 + WiFi 状态(LED6, 常亮=已连接) */
         uint8_t led_mask = SEL_LED[sel] | (ble_on ? LED_BLE : 0) |
@@ -676,6 +784,7 @@ void app_main(void)
     wifi_sta_init();
 
     s_settings_q = xQueueCreate(1, sizeof(uint32_t));
+    s_reset_q    = xQueueCreate(1, sizeof(uint32_t));
 
     xTaskCreatePinnedToCore(sensor_task, "sensor", 4096, NULL, 4, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "control", 2048, NULL, 5, NULL, 0);
@@ -684,4 +793,5 @@ void app_main(void)
     xTaskCreatePinnedToCore(alarm_task, "alarm", ALARM_TASK_STACK, NULL,
                             ALARM_TASK_PRIO, NULL, ALARM_TASK_CORE);
     xTaskCreatePinnedToCore(bind_task, "bind", 4096, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(reset_task, "reset", 4096, NULL, 3, NULL, 1);
 }

@@ -185,3 +185,24 @@ bool wifi_sta_is_connected(void)
 {
     return s_connected;
 }
+
+void wifi_sta_clear(void)
+{
+    /* 擦除 NVS 中保存的 WiFi 凭据 */
+    nvs_handle_t handle;
+    if (nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        nvs_erase_all(handle);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+
+    s_ssid[0] = '\0';
+    s_pass[0] = '\0';
+    s_connected = false;
+    s_retry_count = 0;
+
+    if (s_started) {
+        esp_wifi_stop();
+        s_started = false;
+    }
+}

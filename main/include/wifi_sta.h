@@ -47,6 +47,12 @@ esp_err_t wifi_sta_connect(const char *ssid, const char *password);
  */
 bool wifi_sta_is_connected(void);
 
+/**
+ * @brief 清除 WiFi 配置并断开
+ * @note  擦除 NVS 中保存的 SSID/密码, 停止 WiFi 以便设备回到未配网状态
+ */
+void wifi_sta_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

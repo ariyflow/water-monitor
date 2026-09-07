@@ -66,6 +66,12 @@ esp_err_t dev_cfg_get_serial(char *buf, size_t size);
  */
 bool dev_cfg_has_serial(void);
 
+/**
+ * @brief 清除设备身份配置(用户名与序列号)
+ * @note  用于恢复出厂: 擦除 NVS 中保存的 username 与 serial
+ */
+void dev_cfg_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

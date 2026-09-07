@@ -76,3 +76,9 @@ bool dev_cfg_has_serial(void)
     char buf[DEV_SERIAL_MAX] = {0};
     return (dev_cfg_get_serial(buf, sizeof buf) == ESP_OK && buf[0] != '\0');
 }
+
+void dev_cfg_clear(void)
+{
+    dev_set_str(DEV_KEY_USERNAME, "");
+    dev_set_str(DEV_KEY_SERIAL, "");
+}
