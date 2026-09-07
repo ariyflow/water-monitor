@@ -34,7 +34,7 @@ extern "C" {
  * 流量判断: 流量 > FLOW_ALARM_HIGH_LPM 时报警。
  * 单位: L/min (流量传感器单位为升/分钟)
  */
-#define FLOW_ALARM_HIGH_LPM 300.0f  /**< 流量上限: 大于此值时报警 */
+#define FLOW_ALARM_HIGH_LPM 20.0f  /**< 流量上限: 大于此值时报警 */
 
 /* ====================== 3. 电导率阈值 ====================== */
 /*
