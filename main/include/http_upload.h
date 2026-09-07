@@ -31,9 +31,6 @@ extern "C" {
 /** 传感器上报周期(ms) */
 #define UPLOAD_PERIOD_MS 1000
 
-/** PH 值固定 */
-#define PH_VALUE 7.0f
-
 /**
  * @brief 向服务器 POST 上报一次传感器数据
  * @param ph           pH 值
@@ -59,7 +56,7 @@ esp_err_t wm_http_fetch_serial(const char *username, char *out, size_t out_size)
 /**
  * @brief 向服务器上报一条报警(设备驱动, 无需登录)
  * @param serial       设备序列号
- * @param type         报警类型: temperature/flow/ec/turbidity
+ * @param type         报警类型: temperature/flow/ec/turbidity/ph
  * @param value        触发报警的读数
  * @param threshold    对应阈值
  * @param ph           pH 值

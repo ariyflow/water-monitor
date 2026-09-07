@@ -61,7 +61,7 @@ esp_err_t wm_http_upload(float ph, float temperature, float flow,
 
     len = snprintf(
         body, sizeof body,
-        "{\"serial\":\"%s\",\"ph\":%.1f,\"temperature\":%.2f,"
+        "{\"serial\":\"%s\",\"ph\":%.2f,\"temperature\":%.2f,"
         "\"flow\":%.2f,\"turbidity\":%.0f,\"conductivity\":%d}",
         serial, ph, temperature, flow, turbidity, conductivity);
     if (len <= 0 || len >= (int)sizeof body) {
@@ -236,6 +236,12 @@ esp_err_t wm_http_fetch_thresholds(const char *serial, alarm_params_t *out)
                     it = cJSON_GetObjectItemCaseSensitive(data, "turb_high_ntu");
                     val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->turb_high_ntu;
                     out->turb_high_ntu = val;
+                    it = cJSON_GetObjectItemCaseSensitive(data, "ph_low");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->ph_low;
+                    out->ph_low = val;
+                    it = cJSON_GetObjectItemCaseSensitive(data, "ph_high");
+                    val = cJSON_IsNumber(it) ? (float)it->valuedouble : out->ph_high;
+                    out->ph_high = val;
                     err = ESP_OK;
                 }
                 cJSON_Delete(root);
@@ -272,7 +278,7 @@ esp_err_t wm_http_report_alarm(const char *serial, const char *type, float value
     len = snprintf(
         body, sizeof body,
         "{\"serial\":\"%s\",\"active\":true,\"type\":\"%s\",\"value\":%.2f,"
-        "\"threshold\":%.2f,\"ph\":%.1f,\"temperature\":%.2f,\"flow\":%.2f,"
+        "\"threshold\":%.2f,\"ph\":%.2f,\"temperature\":%.2f,\"flow\":%.2f,"
         "\"turbidity\":%.0f,\"conductivity\":%d,\"message\":\"%s\"}",
         serial, type ? type : "", (double)value, (double)threshold, (double)ph,
         (double)temperature, (double)flow, (double)turbidity, conductivity,

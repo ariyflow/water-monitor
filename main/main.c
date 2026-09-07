@@ -1,6 +1,6 @@
 /**
  * @file main.c
- * @brief 多传感器监测: 温度 + 水流量 + EC 电导率 + 浊度, 数码管显示, LED 指示
+ * @brief 多传感器监测: 温度 + 水流量 + EC 电导率 + 浊度 + PH, 数码管显示, LED 指示
  *
  * 硬件连接:
  *   - DS18B20 数据线: GPIO5 (需 4.7k 上拉到 3.3V)
@@ -8,6 +8,7 @@
  *   - EC 模拟输出:    GPIO4 (ADC1_CH3)
  *   - 浊度 AO:        GPIO7 (ADC1_CH6); GPIO15 不用, DO 不接
  *   - 数码管: 见 seg.h (位选 IO13/14, 段选 IO18/16/11/3/8/17/12/46)
+ *   - PH 模拟:   GPIO9 (ADC1_CH8, 见 ph.h)
  *   - LED:   见 led.h (A0/A1/A2 -> IO35/36/37)
  *   - 按键:  SW1 -> IO48 (key.h KEY_0), SW2 -> IO45 (key.h KEY_1, 蓝牙开关)
  *   - 蜂鸣器: 见 buzzer.h (IO2, 高电平鸣响)
@@ -21,14 +22,14 @@
  *   两任务固定到不同核, 互不抢占: 1-Wire 位时序与脉冲计数不受显示扫描影响。
  *
  * 显示切换:
- *   - 开机默认显示温度, 按 SW1 循环切换: 温度 -> 水流量 -> EC -> 浊度 -> 温度...
- *   - LED 指示: 温度 0x01(LED0), 水流量 0x02(LED1), EC 0x04(LED2), 浊度 0x08(LED3)
+ *   - 开机默认显示温度, 按 SW1 循环切换: 温度 -> 水流量 -> EC -> 浊度 -> PH -> 温度...
+ *   - LED 指示: 温度 0x01(LED0), 水流量 0x02(LED1), EC 0x04(LED2), 浊度 0x08(LED3), PH 0x10(LED4)
  *
  * 蓝牙控制:
  *   - 开机默认关闭蓝牙(不广播), 按 SW2(KEY_1) 开/关蓝牙
  *   - 蓝牙开启时 LED7(0x80) 点亮, 关闭后熄灭
  *
- * 显示格式: 温度/流量 XX.X, EC 整数(μS/cm), 浊度整数(0~100); 失败显示 "EEEE"
+ * 显示格式: 温度/流量 XX.X, PH XX.XX, EC 整数(μS/cm), 浊度整数(0~100); 失败显示 "EEEE"
  */
 
 #include <stdint.h>
@@ -44,6 +45,7 @@
 #include "yf_s201.h"
 #include "ec.h"
 #include "turbidity.h"
+#include "ph.h"
 #include "led.h"
 #include "key.h"
 #include "ble.h"
@@ -67,6 +69,7 @@
 #define LED_FLOW 0x02 /**< 指示位: 数码管显示水流量 */
 #define LED_EC   0x04 /**< 指示位: 数码管显示电导率 */
 #define LED_TURB 0x08 /**< 指示位: 数码管显示浊度 */
+#define LED_PH   0x10 /**< 指示位: 数码管显示 PH */
 #define LED_BLE  0x80 /**< 指示位: 蓝牙开启指示(LED7, 最高位) */
 #define LED_WIFI 0x40 /**< 指示位: WiFi 已连接指示(LED6) */
 
@@ -76,6 +79,7 @@ enum {
     SEL_FLOW,
     SEL_EC,
     SEL_TURB,
+    SEL_PH,
     SEL_NUM
 };
 
@@ -85,6 +89,7 @@ static const uint8_t SEL_LED[SEL_NUM] = {
     [SEL_FLOW] = LED_FLOW,
     [SEL_EC]   = LED_EC,
     [SEL_TURB] = LED_TURB,
+    [SEL_PH]   = LED_PH,
 };
 
 /** @brief 各显示通道的小数点位置: 2 = XX.X, -1 = 整数显示 */
@@ -93,14 +98,16 @@ static const int SEL_POINT[SEL_NUM] = {
     [SEL_FLOW] = 2,
     [SEL_EC]   = -1,
     [SEL_TURB] = -1,
+    [SEL_PH]   = 1,
 };
 
 /** @brief 共享显示值: -1 表示错误; 传感器任务写, 控制任务读
- *         temp/flow 为数值*10, ec 为整数 μS/cm, turb 为整数(0~100) */
+ *         temp/flow 为数值*10, ec 为整数 μS/cm, turb 为整数(0~100), ph 为数值*100 */
 static volatile int g_temp = 0;
 static volatile int g_flow = 0;
 static volatile int g_ec   = 0;
 static volatile int g_turb = 0;
+static volatile int g_ph   = 0;
 
 /** @brief 报警去抖计数: 连续多少次采样满足报警条件才真正鸣响(防开机/瞬时误报) */
 static volatile int g_alarm_hits = 0;
@@ -112,6 +119,8 @@ static volatile float s_temp_high_c    = TEMP_ALARM_HIGH_C;
 static volatile float s_flow_high_lpm  = FLOW_ALARM_HIGH_LPM;
 static volatile float s_ec_high_us_cm  = EC_ALARM_HIGH_US_CM;
 static volatile float s_turb_high_ntu  = TURB_ALARM_HIGH_NTU;
+static volatile float s_ph_low         = PH_ALARM_LOW_PH;
+static volatile float s_ph_high        = PH_ALARM_HIGH_PH;
 
 /** @brief 报警明细: 描述第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度) */
 typedef struct {
@@ -199,11 +208,12 @@ static bool alarm_active(void);
 /** @brief 传感器任务: 常驻 core 1, 周期性调用各传感器读取函数 */
 static void sensor_task(void *arg)
 {
-    ESP_LOGI(TAG, "sensor format: (temp,flow,ec,turb)");
+    ESP_LOGI(TAG, "sensor format: (temp,flow,ec,turb,ph)");
 
     while (1) {
-        float temp = 0.0f, flow = 0.0f, ec = 0.0f, turb = 0.0f;
-        bool temp_ok = false, flow_ok = false, ec_ok = false, turb_ok = false;
+        float temp = 0.0f, flow = 0.0f, ec = 0.0f, turb = 0.0f, ph = 0.0f;
+        bool temp_ok = false, flow_ok = false, ec_ok = false, turb_ok = false,
+             ph_ok = false;
 
         /* 1) 温度: 启动转换并等待完成 */
         if (ds18b20_start_conversion() == ESP_OK) {
@@ -233,12 +243,21 @@ static void sensor_task(void *arg)
             g_turb = ERR_DISP;
         }
 
-        /* 4) 流量: 读取一个测量窗口内的流量 */
+        /* 4) PH: 线性电压换算, 存百分位(显示两位小数) */
+        ph_ok = (ph_read(&ph) == ESP_OK);
+        if (ph_ok) {
+            int v = (int)(ph * 100.0f + 0.5f);
+            g_ph = (v < 0) ? 0 : ((v > 9999) ? 9999 : v);
+        } else {
+            g_ph = ERR_DISP;
+        }
+
+        /* 5) 流量: 读取一个测量窗口内的流量 */
         flow_ok = (yf_s201_read_flow(&flow) == ESP_OK);
         g_flow = flow_ok ? to_tenths(flow) : ERR_DISP;
 
         /* 每次采样一行输出 */
-        char s_temp[16], s_flow[16], s_ec[16], s_turb[16];
+        char s_temp[16], s_flow[16], s_ec[16], s_turb[16], s_ph[16];
         if (temp_ok) {
             snprintf(s_temp, sizeof s_temp, "%.1f", temp);
         } else {
@@ -259,7 +278,13 @@ static void sensor_task(void *arg)
         } else {
             strcpy(s_turb, "ERR");
         }
-        ESP_LOGI(TAG, "sensor(%s,%s,%s,%s)", s_temp, s_flow, s_ec, s_turb);
+        if (ph_ok) {
+            snprintf(s_ph, sizeof s_ph, "%.2f", ph);
+        } else {
+            strcpy(s_ph, "ERR");
+        }
+        ESP_LOGI(TAG, "sensor(%s,%s,%s,%s,%s)", s_temp, s_flow, s_ec, s_turb,
+                 s_ph);
 
         /* 以最近一次采样判断报警状态, 统计连续命中次数供报警任务去抖;
          * 恰好达到去抖阈值时, 记录触发时刻的读数快照, 供上报使用 */
@@ -360,6 +385,9 @@ static void control_task(void *arg)
         case SEL_TURB:
             v = g_turb;
             break;
+        case SEL_PH:
+            v = g_ph;
+            break;
         case SEL_TEMP:
         default:
             v = g_temp;
@@ -398,7 +426,8 @@ static void upload_task(void *arg)
             float flow = shared_to_float(g_flow);
             float turb = (g_turb == ERR_DISP) ? 0.0f : (float)g_turb;
             int   ec   = (g_ec > 0) ? g_ec : 0;
-            wm_http_upload(PH_VALUE, temp, flow, turb, ec);
+            float ph   = (g_ph == ERR_DISP) ? 0.0f : (float)g_ph / 100.0f;
+            wm_http_upload(ph, temp, flow, turb, ec);
         }
         vTaskDelay(pdMS_TO_TICKS(UPLOAD_PERIOD_MS));
     }
@@ -447,6 +476,8 @@ static void settings_task(void *arg)
                     .flow_high_lpm  = s_flow_high_lpm,
                     .ec_high_us_cm  = s_ec_high_us_cm,
                     .turb_high_ntu  = s_turb_high_ntu,
+                    .ph_low         = s_ph_low,
+                    .ph_high        = s_ph_high,
                 };
                 if (wm_http_fetch_thresholds(serial, &p) == ESP_OK) {
                     s_temp_low_c    = p.temp_low_c;
@@ -454,10 +485,14 @@ static void settings_task(void *arg)
                     s_flow_high_lpm = p.flow_high_lpm;
                     s_ec_high_us_cm = p.ec_high_us_cm;
                     s_turb_high_ntu = p.turb_high_ntu;
+                    s_ph_low        = p.ph_low;
+                    s_ph_high       = p.ph_high;
                     ESP_LOGI(TAG,
-                             "thresholds: T=[%.1f,%.1f] F=%.1f EC=%.0f TURB=%.0f",
+                             "thresholds: T=[%.1f,%.1f] F=%.1f EC=%.0f "
+                             "TURB=%.0f PH=[%.2f,%.2f]",
                              s_temp_low_c, s_temp_high_c, s_flow_high_lpm,
-                             s_ec_high_us_cm, s_turb_high_ntu);
+                             s_ec_high_us_cm, s_turb_high_ntu,
+                             s_ph_low, s_ph_high);
                     if (beep_on_success) {
                         /* 手动同步成功: 短鸣一声 */
                         start_beep();
@@ -492,10 +527,15 @@ static bool alarm_active(void)
     bool turb_alarm = (g_turb != ERR_DISP) &&
         ((float)g_turb > s_turb_high_ntu);
 
-    return temp_alarm || flow_alarm || ec_alarm || turb_alarm;
+    /* PH: 实际 PH = g_ph/100, 区间外报警 */
+    bool ph_alarm = (g_ph != ERR_DISP) &&
+        ((float)g_ph / 100.0f < s_ph_low ||
+         (float)g_ph / 100.0f > s_ph_high);
+
+    return temp_alarm || flow_alarm || ec_alarm || turb_alarm || ph_alarm;
 }
 
-/** @brief 取第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度) */
+/** @brief 取第一个超限项的类型/读数/阈值(优先级: 温度>流量>电导率>浊度>PH) */
 static alarm_detail_t alarm_detail(void)
 {
     float t = (float)g_temp / 10.0f;
@@ -516,6 +556,13 @@ static alarm_detail_t alarm_detail(void)
     if (g_turb != ERR_DISP && (float)g_turb > s_turb_high_ntu) {
         return (alarm_detail_t){ "turbidity", (float)g_turb, s_turb_high_ntu };
     }
+    if (g_ph != ERR_DISP && ((float)g_ph / 100.0f < s_ph_low ||
+                             (float)g_ph / 100.0f > s_ph_high)) {
+        if ((float)g_ph / 100.0f < s_ph_low) {
+            return (alarm_detail_t){ "ph", (float)g_ph / 100.0f, s_ph_low };
+        }
+        return (alarm_detail_t){ "ph", (float)g_ph / 100.0f, s_ph_high };
+    }
     return (alarm_detail_t){ "temperature", t, s_temp_high_c };
 }
 
@@ -527,8 +574,10 @@ static void build_alarm_message(char *buf, size_t size, const alarm_detail_t *d)
         snprintf(buf, size, "流量超标：%.2f L/min（阈值%.1f L/min）", d->value, d->threshold);
     } else if (!strcmp(d->type, "ec")) {
         snprintf(buf, size, "电导率超标：%.0f μS/cm（阈值%.1f μS/cm）", d->value, d->threshold);
-    } else {
+    } else if (!strcmp(d->type, "turbidity")) {
         snprintf(buf, size, "浊度超标：%.0f（阈值%.1f）", d->value, d->threshold);
+    } else {
+        snprintf(buf, size, "PH 超标：%.2f（阈值%.2f）", d->value, d->threshold);
     }
 }
 
@@ -549,8 +598,9 @@ static void alarm_task(void *arg)
                                                          : alarm_detail();
                 char msg[128];
                 build_alarm_message(msg, sizeof msg, &d);
+                float ph = (g_ph == ERR_DISP) ? 0.0f : (float)g_ph / 100.0f;
                 wm_http_report_alarm(serial, d.type, d.value, d.threshold,
-                                     PH_VALUE, (float)g_temp / 10.0f,
+                                     ph, (float)g_temp / 10.0f,
                                      (float)g_flow / 10.0f,
                                      (float)g_turb, (g_ec > 0 ? g_ec : 0), msg);
             } else {
@@ -560,9 +610,9 @@ static void alarm_task(void *arg)
         was_alarm = now_alarm;
 
         if (now_alarm) {
-            ESP_LOGW(TAG, "!! ALARM T=%.1f F=%.1f EC=%d TURB=%d",
+            ESP_LOGW(TAG, "!! ALARM T=%.1f F=%.1f EC=%d TURB=%d PH=%.2f",
                      (float)g_temp / 10.0f, (float)g_flow / 10.0f,
-                     g_ec, g_turb);
+                     g_ec, g_turb, (float)g_ph / 100.0f);
             start_beep();
             vTaskDelay(pdMS_TO_TICKS(BEEP_ON_MS));
             stop_beep();
@@ -615,6 +665,7 @@ void app_main(void)
     yf_s201_init(YF_S201_PIN);
     ec_init(EC_PIN);
     turb_init();
+    ph_init();
 
     set_led(LED_TEMP); /* 默认指示温度 */
     display_value(0, SEL_POINT[SEL_TEMP]); /* 开机显示 0.0 */
