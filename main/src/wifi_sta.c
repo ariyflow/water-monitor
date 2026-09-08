@@ -10,6 +10,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "wifi_sta.h"
@@ -29,6 +30,27 @@ static char s_pass[WIFI_MAX_PASS_LEN + 1] = {0};
 static volatile bool s_started    = false; /**< WiFi 已启动 */
 static volatile bool s_connected  = false; /**< 已连接并获取 IP */
 static int s_retry_count          = 0;
+
+static esp_timer_handle_t s_reconnect_timer = NULL; /**< 非阻塞重连退避定时器 */
+
+/** @brief 重连定时器回调(esp_timer 上下文, 不能阻塞) */
+static void reconnect_timer_cb(void *arg)
+{
+    (void)arg;
+    if (!s_connected && s_ssid[0] != '\0') {
+        ESP_LOGI(WIFI_TAG, "reconnect: connecting to %s", s_ssid);
+        esp_wifi_connect();
+    }
+}
+
+/** @brief 安排一次延迟重连(先停掉旧定时器再重新触发) */
+static void wifi_schedule_reconnect(void)
+{
+    if (s_reconnect_timer != NULL) {
+        esp_timer_stop(s_reconnect_timer);
+        esp_timer_start_once(s_reconnect_timer, WIFI_RETRY_DELAY_MS * 1000);
+    }
+}
 
 static void wifi_set_config(const char *ssid, const char *password)
 {
@@ -89,12 +111,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGW(WIFI_TAG, "disconnected, reason=%d", d->reason);
         s_connected = false;
 
-        if (s_retry_count < WIFI_CONNECT_RETRY && s_ssid[0] != '\0') {
+        if (s_ssid[0] != '\0' && s_retry_count < WIFI_CONNECT_RETRY) {
             s_retry_count++;
             ESP_LOGI(WIFI_TAG, "retry %d/%d to connect", s_retry_count,
                      WIFI_CONNECT_RETRY);
-            vTaskDelay(pdMS_TO_TICKS(WIFI_RETRY_DELAY_MS));
-            esp_wifi_connect();
+            wifi_schedule_reconnect();
         } else {
             ESP_LOGE(WIFI_TAG, "connect to %s failed after %d retries",
                      s_ssid, WIFI_CONNECT_RETRY);
@@ -106,6 +127,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                  s_ssid, IP2STR(&e->ip_info.ip));
         s_connected = true;
         s_retry_count = 0;
+        if (s_reconnect_timer != NULL) {
+            esp_timer_stop(s_reconnect_timer);
+        }
     }
 }
 
@@ -136,6 +160,13 @@ esp_err_t wifi_sta_init(void)
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+
+    /* 重连退避使用非阻塞定时器, 避免在事件回调里 vTaskDelay 阻塞事件循环 */
+    esp_timer_create_args_t timer_args = {
+        .callback = reconnect_timer_cb,
+        .name = "wifi_rc",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_reconnect_timer));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
@@ -178,6 +209,9 @@ esp_err_t wifi_sta_connect(const char *ssid, const char *password)
     if (!s_started) {
         return esp_wifi_start();
     }
+
+    /* 手动切换(已在运行): 先显式断开当前 AP, 再连新 AP, 让切换干净可靠 */
+    esp_wifi_disconnect();
     return esp_wifi_connect();
 }
 
@@ -200,6 +234,10 @@ void wifi_sta_clear(void)
     s_pass[0] = '\0';
     s_connected = false;
     s_retry_count = 0;
+
+    if (s_reconnect_timer != NULL) {
+        esp_timer_stop(s_reconnect_timer);
+    }
 
     if (s_started) {
         esp_wifi_stop();

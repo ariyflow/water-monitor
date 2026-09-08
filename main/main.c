@@ -175,9 +175,10 @@ static void beep_error(void)
     }
 }
 
-/** @brief 解析 BLE 收到的配网信息并连接
+/** @brief 解析 BLE 收到的配网/WiFi 更新信息并连接
  *         载荷格式: [ssid_len:1][pass_len:1][user_len:1][ssid][pass][username]
- *         username 保存到 NVS 以供后续向服务器申请序列号 */
+ *         - user_len > 0: 完整配网, username 保存到 NVS 供后续向服务器申请序列号
+ *         - user_len == 0: 仅更新 WiFi(已注册设备), 不改动 username/serial */
 static void wifi_creds_from_ble(const uint8_t *data, size_t len)
 {
     size_t ssid_len, pass_len, user_len;
@@ -194,8 +195,7 @@ static void wifi_creds_from_ble(const uint8_t *data, size_t len)
         return;
     }
     if (ssid_len == 0 || ssid_len > WIFI_MAX_SSID_LEN ||
-        pass_len > WIFI_MAX_PASS_LEN || user_len == 0 ||
-        user_len > DEV_USERNAME_MAX) {
+        pass_len > WIFI_MAX_PASS_LEN || user_len > DEV_USERNAME_MAX) {
         ESP_LOGW(TAG, "wifi creds: invalid len ssid=%d pass=%d user=%d",
                  (int)ssid_len, (int)pass_len, (int)user_len);
         return;
@@ -207,12 +207,17 @@ static void wifi_creds_from_ble(const uint8_t *data, size_t len)
 
     memcpy(ssid, data + 3, ssid_len);
     memcpy(pass, data + 3 + ssid_len, pass_len);
-    memcpy(user, data + 3 + ssid_len + pass_len, user_len);
 
-    dev_cfg_save_username(user);
+    if (user_len > 0) {
+        memcpy(user, data + 3 + ssid_len + pass_len, user_len);
+        dev_cfg_save_username(user);
+        ESP_LOGI(TAG, "provision: ssid=%s pass_len=%d user=%s",
+                 ssid, (int)pass_len, user);
+    } else {
+        ESP_LOGI(TAG, "wifi update: ssid=%s pass_len=%d",
+                 ssid, (int)pass_len);
+    }
 
-    ESP_LOGI(TAG, "wifi creds: ssid=%s pass_len=%d user=%s",
-             ssid, (int)pass_len, user);
     wifi_sta_connect(ssid, pass);
 }
 
